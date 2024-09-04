@@ -1,15 +1,28 @@
+# Original Repo - https://github.com/willjobs/regulations-public-comments
+
 import sys
 import os
 import requests
 from requests.adapters import HTTPAdapter
 import sqlite3
 import pandas as pd
+import html
 from datetime import datetime
 from dateutil import tz
 import time
 import csv
 import urllib3
+import re
 from argparse import ArgumentParser
+
+EXCEL_SHEET_NAME = "Comments"
+# TODO Parameter for whether to download attachments
+# TODO Parameter for output folder location
+# TODO Continuation of download if interrupted (either by user, system, or reaching API call limit, which can happen for large responses) - One issue is that if cancelled, the records are not written out to the file/db (until the end)
+# TODO in addition to continuation of download, perhaps for the API call limit enabling a wait delay based on response from the server with a countdown and see if the user wants to wait.
+# TODO comment normalization (remove extra spaces, etc.)
+# TODO Conditional formatting of duplicate comments. and unique comment count (maybe as a comment in the header ?)
+
 
 # we are ignoring the HTTPS check because the server occasionally returns malformed certificates (missing EOF)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -259,6 +272,8 @@ class CommentsDownloader:
                               csv_filename=csv_filename)
 
         self._remove_duplicates_from_csv(data_type, csv_filename)
+
+
         self._close_database_connection(conn)
 
         # Note: the count in n_retrieved may not reflect what's in the database because there may be
@@ -445,6 +460,45 @@ class CommentsDownloader:
             # are issues during the download process or the database prevents importing duplicates from pagination.
             n_comments = self._get_item_count(data_type="comments", csv_filename=csv_filename, db_filename=db_filename, 
                                               filter_column="commentOnDocumentId", filter_value=document_id)
+            
+
+            # df.to_excel(csv_filename[:-3] + "xlsx" , sheet_name="Comments", index=False, header=True, engine='xlsxwriter')
+            # convert csv to xslx
+            df_new = pd.read_csv(csv_filename)
+ 
+            # saving xlsx file
+            writer = pd.ExcelWriter(csv_filename[:-3] + "xlsx", engine='xlsxwriter')
+            
+
+            # Get the xlsxwriter workbook and worksheet objects.
+            #workbook  = writer.book
+            #worksheet = writer.sheets[EXCEL_SHEET_NAME]
+
+            # Set the autofilter.
+            #worksheet.autofilter(0, 0, df.shape[0], df.shape[1])
+
+            #df_new.to_excel(writer, sheet_name=EXCEL_SHEET_NAME, index=False, header=True, engine='xlsxwriter')
+
+
+
+
+            #df_new = pd.read_csv(csv_filename) #, sheet_name = EXCEL_SHEET_NAME)
+        
+            # saving xlsx file
+            
+            
+
+            # Get the xlsxwriter workbook and worksheet objects.
+            
+
+            df_new.to_excel(writer, sheet_name=EXCEL_SHEET_NAME, index=False, header=True, engine='xlsxwriter')
+            workbook  = writer.book
+            for worksheet in writer.sheets.values():
+                worksheet.autofilter(0, 0, df_new.shape[0], df_new.shape[1] - 1)
+            writer.close()
+
+
+
         else:
             n_comments = 0
 
@@ -844,7 +898,23 @@ class CommentsDownloader:
         
         return n_items
 
+    def _cleanhtml(self, raw_html):
+        # remove tages
+        
+        CLEANR = CLEANR = re.compile('<.*?>')
+        cleantext = re.sub(CLEANR, '', raw_html)
+        # decode special characters
+        cleantext = html.unescape(cleantext)
+        # replace right apostrophe with a regular one (excel opens csv in default windows character set that does not support tight apostrophe)
+        #cleantext = cleantext.replace("’", "'" )
+        # Remove extra whitespace
+        cleantext = ' '.join(cleantext.split())
+        
+        
 
+
+        return cleantext
+    
     def _get_processed_data(self, data, id_col, attachments=None):
         """Used to take the data contained in a response (e.g., the data for a bunch of comments)
         and remove unnecessary columns (i.e., those not specified in `cols`). Also adds the ID
@@ -871,9 +941,30 @@ class CommentsDownloader:
                 if attachments[idx] is not None:
                     # create a "|" separated list of URLs
                     out["attachmentLinks"] = "|".join([x['fileUrl'] for x in attachments[idx]])
+
+                    # download the attachemnts - TODO make this a command line option
+                    for found_attachment in attachments[idx]:
+                        fileUrl = found_attachment['fileUrl']
+                        print(f"Found Attachment {fileUrl}...\r\n")
+                        iterator = [m.start() for m in re.finditer(r"/", fileUrl)]
+                        if len(iterator)>= 3:
+                            N = iterator[2] + 1
+                            fileName = fileUrl[N:].replace("/", "_" )
+                            print(f"Downloading attachment: {fileUrl[N:]}")
+                            r = requests.get(fileUrl, allow_redirects=True)
+                            open(fileName, 'wb').write(r.content)
+
+
                 else:
                     out["attachmentLinks"] = ""
-
+            
+            if 'comment' in out.keys() and out["comment"] is not None:
+                comment_text = out["comment"]
+                #print(f"comment {comment_text}\r\n------------------\r\n")
+                out["comment"] = self._cleanhtml(comment_text)
+                comment_text = out["comment"]
+                print(f"comment {comment_text}\r\n\r\n")
+                #input("Press any key to continue")
             # add the item's ID at the first position
             out = {id_col: item['id'], **out}
             output.append(out)
@@ -933,6 +1024,8 @@ class CommentsDownloader:
 
         df.to_csv(csv_filename, index=False, mode='a', quoting=csv.QUOTE_ALL,
                   header=(not os.path.isfile(csv_filename)))
+        
+        #df.to_excel(csv_filename[:-3] + "xlsx" , sheet_name="Comments", index=False, header=True, engine='xlsxwriter')
 
         print("Done", flush=True)
 
@@ -1014,6 +1107,7 @@ class CommentsDownloader:
         the_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"{the_time}: Done. Removed {duplicates} duplicate rows from {csv_filename}.")
 
+    
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Download comments on a given document or docket")
@@ -1022,6 +1116,22 @@ if __name__ == "__main__":
     parser.add_argument("--docket", type=str, help="docketId for which to download comments")
     args = parser.parse_args()
     api_key = args.key
+
+    #textstuff = "I am writing in support of CMS&rsquo; proposals    to    improve       interoperability and streamline electronic prior authorization. The agency&rsquo;s proposal will help to relieve the immense burden prior authorization has placed on me and other providers. It is critical that CMS finalize the proposed rule to mitigate the unwarranted burden prior authorization has been on both patients and providers. I also encourage CMS to do more to address this issue. This rule is a step in the right direction, but additional major reforms need to be made to correct the problem. <br/><br/>While I support CMS&rsquo; efforts overall, I urge the agency to see how arbitrary denials have a direct impact on the quality and overall benefits of essential medical services provided by physical therapists. PTs and other providers are continually experiencing more demanding, complicated, and burdensome utilization reduction polices. \r\nOften, patients must postpone care due to seemingly arbitrary denials, which are overturned on appeal but at considerable time and expense to the provider; delays in making a determination; piecemeal approvals requiring the provider to repeatedly resubmit the same requests; and payment denials for lack of \r\nauthorization even when it was properly obtained. <br/><br/>CMS proposes to require payers to automate prior authorization and place prior authorization information and documentation requirements within the provider&rsquo;s workflow. While prior authorization can have a beneficial impact on quality when used correctly, in most cases it has become a substantial burden for patients and providers due to the immense amount of time required to complete a request, lack of transparency obtaining authorization, payers&rsquo; failure to respond in a reasonable time, and partial approvals which lead to a continuous cycle of repeated requests. Often patients are forced to wait weeks while providers navigate the process. CMS recognizes in its proposed rule that this is a problem, admitting that prior authorization has become a huge source of burnout and continues to pose a risk to patients who require immediate care. I \r\napplaud CMS for acknowledging this burden that is faced daily by providers, and I know that these proposals will help. <br/><br/>I support CMS&rsquo; proposal to require payers respond within a certain timeframe, provide a clear reason for denials, and publicly report data on rate of approvals, denials, and appeals. I strongly support the requirement that all payers list a specific reason for denials. I urge CMS to provide a narrow definition of &ldquo;denial.&rdquo; It is exceedingly common for payers to only approve two or three PT sessions for patients who had requested more sessions. Because the payer considers its approval of two visits an approval instead of a denial, the patient has no appeal rights, and must obtain prior authorization repeatedly patients and providers must be able to appeal any modification the payer makes to the request if they feel it was made in error. <br/><br/>I support CMS&rsquo; proposal to give in-network providers access to adjudicated claims, encounter data, and the patient&rsquo;s prior authorization decisions. I applaud CMS for proposing an interface that will streamline workflow and allow access to patient data more quickly and efficiently. My hope is that this process will lead to fewer duplicative requests, less need for appeals, and possibly, lower costs. However, as a provider, access to remittances and cost-sharing information is needed, because providers are expected to help my patients understand their health insurance coverage. Not only does it benefit the patient \r\nto have a provider who is familiar with their health plan, but it also helps me avoid negative interactions with the patient when a visit is not adequately covered. Granting us access to this information will allow us to address all aspects of the patient&rsquo;s well-being. <br/><br/>I support CMS including Medicare Advantage plans in this rule, given that in 2021 over 88% of services related to physical therapy and speech-language pathology provided by MA plans required prior approval, according to KFF. Additionally, a study from HHS&rsquo; Office of the Inspector General found that capitated payment modeuture that foster more open access to physical therapy services and lessen the administrative load that often takes away from a provider&rsquo;s ability to deliver high-quality patient care."
+    #textstuff = html.unescape(textstuff)
+    #textstuff = ' '.join(textstuff.split())
+    #print(textstuff)
+
+    #CLEANR = CLEANR = re.compile('<.*?>')
+    #textstuff = re.sub(CLEANR, '', textstuff)
+    # decode special characters
+    #textstuff = html.unescape(textstuff)
+    # Remove extra whitespace
+    #textstuff = ' '.join(textstuff.split())
+    #print(textstuff)
+
+
+
     if api_key is None:
         # More user-friendly on command-line than raising a ValueError
         print("Error: Must specify an API key (get one at https://open.gsa.gov/api/regulationsgov/)")
